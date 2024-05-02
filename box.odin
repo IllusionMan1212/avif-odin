@@ -3,12 +3,14 @@ package avif
 import "core:encoding/endian"
 import "core:fmt"
 import "core:io"
+import "core:math"
+import "core:image"
 import "core:strings"
 import "core:unicode/utf8"
 
 BOX_HEADER_SIZE :: 8 // 4 for box size, 4 for box type
 
-_BoxError :: enum {
+BoxError :: enum {
     ReadExceedsBox,
 }
 
@@ -33,125 +35,151 @@ BoxType :: enum u32 {
     CLLI = 'c' << 24 | 'l' << 16 | 'l' << 8 | 'i', // Content Light Level Info
 }
 
-BoxError :: union {
+Error :: union {
     io.Error,
-    _BoxError,
+    BoxError,
+    OBUError,
+    image.General_Image_Error,
 }
 
 Box :: struct {
     size: u32,
     type: BoxType,
+    pos: i64,
 }
 
 Reader :: struct {
-    using current_box: Box,
+    box: Box,
     s:                 []byte, // read-only buffer
     i:                 i64, // current reading index
-    box_pos:           i64, // Byte index for the Box
+    bits_read_in_byte: u8,
 }
 
 reader_init :: proc(r: ^Reader, s: []byte) {
     r.s = s
     r.i = 0
-    r.box_pos = 0
+    r.box.pos = 0
 }
 
-read_header :: proc(r: ^Reader) -> (err: BoxError) {
-    r.box_pos = 0
-    r.size = read_u32be(r) or_return
+read_header :: proc(r: ^Reader) -> (err: Error) {
+    r.box.pos = 0
+    r.box.size = read_u32be(r) or_return
     type := read_u32be(r) or_return
-    r.type = transmute(BoxType)type
+    r.box.type = transmute(BoxType)type
 
     return err
 }
 
-read_byte :: proc(r: ^Reader) -> (byte, BoxError) {
+read_bit :: proc(r: ^Reader) -> (bit: byte, err: Error) {
     if r.i >= i64(len(r.s)) {
         return 0, .EOF
     }
-    if r.box_pos >= i64(r.size) {
+    if r.box.size != 0 && r.box.pos >= i64(r.box.size) {
+        return 0, .ReadExceedsBox
+    }
+    byte := r.s[r.i]
+
+    // Get the bit that's after however many bits read starting from the MSB in the byte
+    bits := 8 - (r.bits_read_in_byte + 1)
+    b := (r.s[r.i:r.i+1][0] & auto_cast math.pow2_f32(bits)) >> bits
+    r.bits_read_in_byte += 1
+
+    if r.bits_read_in_byte == 8 {
+        r.i += 1
+        r.box.pos += 1
+        r.bits_read_in_byte = 0
+    }
+
+    return b, nil
+}
+
+read_byte :: proc(r: ^Reader) -> (byte, Error) {
+    if r.i >= i64(len(r.s)) {
+        return 0, .EOF
+    }
+    if r.box.size != 0 && r.box.pos >= i64(r.box.size) {
         return 0, .ReadExceedsBox
     }
     b := r.s[r.i]
     r.i += 1
-    r.box_pos += 1
+    r.box.pos += 1
     return b, nil
 }
 
-read_u16be :: proc(r: ^Reader) -> (u16, BoxError) {
+read_u16be :: proc(r: ^Reader) -> (u16, Error) {
     if r.i >= i64(len(r.s)) {
         return 0, .EOF
     }
-    if r.box_pos + 2 > i64(r.size) {
+    if r.box.size != 0 && r.box.pos + 2 > i64(r.box.size) {
         return 0, .ReadExceedsBox
     }
     b := endian.unchecked_get_u16be(r.s[r.i:])
     r.i += 2
-    r.box_pos += 2
+    r.box.pos += 2
     return b, nil
 }
 
-read_u32be :: proc(r: ^Reader) -> (u32, BoxError) {
+read_u32be :: proc(r: ^Reader) -> (u32, Error) {
     if r.i >= i64(len(r.s)) {
         return 0, .EOF
     }
-    if r.size != 0 && r.box_pos + 4 > i64(r.size) {
+    if r.box.size != 0 && r.box.pos + 4 > i64(r.box.size) {
         return 0, .ReadExceedsBox
     }
     b := endian.unchecked_get_u32be(r.s[r.i:])
     r.i += 4
-    r.box_pos += 4
+    r.box.pos += 4
     return b, nil
 }
 
-read_u64be :: proc(r: ^Reader) -> (u64, BoxError) {
+read_u64be :: proc(r: ^Reader) -> (u64, Error) {
     if r.i >= i64(len(r.s)) {
         return 0, .EOF
     }
-    if r.size != 0 && r.box_pos + 8 > i64(r.size) {
+    if r.box.size != 0 && r.box.pos + 8 > i64(r.box.size) {
         return 0, .ReadExceedsBox
     }
     b := endian.unchecked_get_u64be(r.s[r.i:])
     r.i += 8
-    r.box_pos += 8
+    r.box.pos += 8
     return b, nil
 }
 
-read_slice :: proc(r: ^Reader, s: []byte) -> (n: int, err: BoxError) {
+read_slice :: proc(r: ^Reader, s: []byte) -> (n: int, err: Error) {
     if r.i >= i64(len(r.s)) {
         return 0, .EOF
     }
     n = copy(s, r.s[r.i:])
-    if r.box_pos + i64(n) > i64(r.size) {
+    if r.box.pos + i64(n) > i64(r.box.size) {
         return 0, .ReadExceedsBox
     }
     r.i += i64(n)
-    r.box_pos += i64(n)
+    r.box.pos += i64(n)
     return
 }
 
-read_rune :: proc(r: ^Reader) -> (ch: rune, size: int, err: BoxError) {
+read_rune :: proc(r: ^Reader) -> (ch: rune, size: int, err: Error) {
     if r.i >= i64(len(r.s)) {
         return 0, 0, .EOF
     }
     if c := r.s[r.i]; c < utf8.RUNE_SELF {
-        if r.box_pos >= i64(r.size) {
+        if r.box.pos >= i64(r.box.size) {
             return 0, 0, .ReadExceedsBox
         }
         r.i += 1
-        r.box_pos += 1
+        r.box.pos += 1
         return rune(c), 1, nil
     }
     ch, size = utf8.decode_rune(r.s[r.i:])
-    if r.box_pos + i64(size) > i64(r.size) {
+    if r.box.pos + i64(size) > i64(r.box.size) {
         return 0, 0, .ReadExceedsBox
     }
     r.i += i64(size)
-    r.box_pos += i64(size)
+    r.box.pos += i64(size)
     return
 }
 
-read_string :: proc(r: ^Reader) -> (str: string, err: BoxError) {
+read_string :: proc(r: ^Reader) -> (str: string, err: Error) {
     if r.i >= i64(len(r.s)) {
         return "", .EOF
     }
@@ -173,32 +201,39 @@ read_string :: proc(r: ^Reader) -> (str: string, err: BoxError) {
 }
 
 @(private = "file")
-read_bitfield_u32 :: proc(r: ^Reader, $T: typeid) -> (T, BoxError) where size_of(T) == 4 {
+read_bitfield_u32 :: proc(r: ^Reader, $T: typeid) -> (T, Error) where size_of(T) == 4 {
     b, err := read_u32be(r)
     return T(b), err
 }
 
 @(private = "file")
-read_bitfield_u16 :: proc(r: ^Reader, $T: typeid) -> (T, BoxError) where size_of(T) == 2 {
+read_bitfield_u16 :: proc(r: ^Reader, $T: typeid) -> (T, Error) where size_of(T) == 2 {
     b, err := read_u16be(r)
     return T(b), err
 }
 
+@(private = "file")
+read_bitfield_u8 :: proc(r: ^Reader, $T: typeid) -> (T, Error) where size_of(T) == 1 {
+    b, err := read_byte(r)
+    return T(b), err
+}
+
 read_bitfield :: proc {
+    read_bitfield_u8,
     read_bitfield_u16,
     read_bitfield_u32,
 }
 
 skip_box :: proc(r: ^Reader) {
-    fmt.printfln("SKIPPED! %v with size %d", r.type, r.size)
-    reader_seek(r, auto_cast r.size - BOX_HEADER_SIZE, .Current)
+    fmt.printfln("SKIPPED! %v with size %d", r.box.type, r.box.size)
+    reader_seek(r, auto_cast r.box.size - BOX_HEADER_SIZE, .Current)
 }
 
 remaining_box_size :: proc(r: ^Reader) -> i64 {
-    return i64(r.size) - r.box_pos
+    return i64(r.box.size) - r.box.pos
 }
 
-reader_seek :: proc(r: ^Reader, offset: i64, whence: io.Seek_From) -> (i64, BoxError) {
+reader_seek :: proc(r: ^Reader, offset: i64, whence: io.Seek_From) -> (i64, Error) {
     abs: i64
     switch whence {
         case .Start:

@@ -7,7 +7,7 @@ import "core:encoding/endian"
 import "core:io"
 import "core:strings"
 
-Error :: image.Error
+//Error :: image.Error
 //Image   :: image.Image
 Options :: image.Options
 
@@ -130,14 +130,14 @@ read_box :: proc(img: ^Image, reader: ^Reader) -> (err: io.Error) {
     }
 
     // if the Box has a size 0 then it's the last Box, parse it and return EOF
-    if reader.size == 0 {
+    if reader.box.size == 0 {
         err = .EOF
     }
 
-    fmt.println("box size:", reader.size)
-    fmt.println("type:", reader.type)
+    fmt.println("box size:", reader.box.size)
+    fmt.println("type:", reader.box.type)
 
-    #partial switch reader.type {
+    #partial switch reader.box.type {
         case .FTYP:
             read_ftyp(img, reader)
         case .META:
@@ -164,12 +164,23 @@ read_box :: proc(img: ^Image, reader: ^Reader) -> (err: io.Error) {
             read_colr(reader)
         case .IPMA:
             read_ipma(reader)
+        case .MDAT:
+            read_mdat(reader)
         case:
             // Skip unknown boxes
             skip_box(reader)
     }
 
     return err
+}
+
+@(private)
+read_mdat :: proc(reader: ^Reader) {
+    // TODO:
+    read_obu(reader)
+    read_obu(reader)
+    read_obu(reader)
+    read_obu(reader)
 }
 
 @(private)

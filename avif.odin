@@ -76,6 +76,7 @@ ISOBMFFBrand :: enum u32 {
     AVIO = 'a' << 24 | 'v' << 16 | 'i' << 8 | 'o',
     MSF1 = 'm' << 24 | 's' << 16 | 'f' << 8 | '1',
     AV01 = 'a' << 24 | 'v' << 16 | '0' << 8 | '1',
+    ISO8 = 'i' << 24 | 's' << 16 | 'o' << 8 | '8',
 }
 
 HEIFTrack :: enum u32 {
@@ -176,11 +177,13 @@ read_box :: proc(img: ^Image, reader: ^Reader) -> (err: io.Error) {
 
 @(private)
 read_mdat :: proc(reader: ^Reader) {
+    seq_header: SequenceHeader
+    frame_header: FrameHeader
     // TODO:
-    read_obu(reader)
-    read_obu(reader)
-    read_obu(reader)
-    read_obu(reader)
+    read_obu(reader, &seq_header, &frame_header)
+    read_obu(reader, &seq_header, &frame_header)
+    read_obu(reader, &seq_header, &frame_header)
+    read_obu(reader, &seq_header, &frame_header)
 }
 
 @(private)
